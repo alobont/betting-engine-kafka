@@ -1,0 +1,242 @@
+import java.nio.charset.StandardCharsets
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.12'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'com.google.protobuf' version '0.9.4'
+}
+
+group = 'com.bettingengine'
+version = '0.0.1-SNAPSHOT'
+
+ext {
+    protobufVersion = '4.29.1'
+    rocketmqSpringVersion = '2.3.4'
+    awaitilityVersion = '4.2.2'
+}
+
+def localClusterNameProvider = providers.gradleProperty('k8s.cluster.name').orElse('betting-engine-local')
+def localNamespaceProvider = providers.gradleProperty('k8s.namespace').orElse('betting-engine-local')
+def localDockerImageProvider = providers.gradleProperty('docker.image').orElse('betting-engine:local')
+def localBaseUrlProvider = providers.gradleProperty('local.k8s.base-url').orElse('http://localhost:8080')
+def kindExecutableProvider = providers.gradleProperty('kind.bin').orElse(System.getenv('KIND_BIN') ?: 'kind')
+def kubectlExecutableProvider = providers.gradleProperty('kubectl.bin').orElse(System.getenv('KUBECTL_BIN') ?: 'kubectl')
+def kindConfigFile = layout.projectDirectory.file('k8s/kind/kind-config.yaml').asFile.absolutePath
+
+def executeCommand = { List<String> command ->
+    exec {
+        commandLine command
+    }
+}
+
+def captureCommandOutput = { List<String> command ->
+    ByteArrayOutputStream stdout = new ByteArrayOutputStream()
+    exec {
+        commandLine command
+        standardOutput = stdout
+    }
+    stdout.toString(StandardCharsets.UTF_8).trim()
+}
+
+def kindClusterExists = { String kindExecutable, String clusterName ->
+    try {
+        captureCommandOutput([kindExecutable, 'get', 'clusters'])
+                .readLines()
+                .contains(clusterName)
+    } catch (Exception ignored) {
+        false
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+    e2eTestImplementation.extendsFrom integrationTestImplementation
+    e2eTestRuntimeOnly.extendsFrom integrationTestRuntimeOnly
+}
+
+sourceSets {
+    integrationTest {
+        java.srcDir file('src/integrationTest/java')
+        resources.srcDir file('src/integrationTest/resources')
+        compileClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+    e2eTest {
+        java.srcDir file('src/e2eTest/java')
+        resources.srcDir file('src/e2eTest/resources')
+        compileClasspath += sourceSets.main.output + sourceSets.integrationTest.output + configurations.testRuntimeClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.kafka:spring-kafka'
+    implementation "org.apache.rocketmq:rocketmq-spring-boot-starter:${rocketmqSpringVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation "org.awaitility:awaitility:${awaitilityVersion}"
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${protobufVersion}"
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += '-parameters'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs integration tests.'
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    dependsOn tasks.named('localClusterUp')
+    shouldRunAfter tasks.test
+    useJUnitPlatform()
+    systemProperty 'local.k8s.enabled', 'true'
+    systemProperty 'local.k8s.base-url', localBaseUrlProvider.get()
+    systemProperty 'local.k8s.namespace', localNamespaceProvider.get()
+    systemProperty 'kubectl.bin', kubectlExecutableProvider.get()
+}
+
+tasks.register('e2eTest', Test) {
+    description = 'Runs local Kubernetes end-to-end tests.'
+    group = 'verification'
+    testClassesDirs = sourceSets.e2eTest.output.classesDirs
+    classpath = sourceSets.e2eTest.runtimeClasspath
+    dependsOn tasks.named('localClusterUp')
+    shouldRunAfter tasks.named('integrationTest')
+    useJUnitPlatform()
+    systemProperty 'local.k8s.enabled', 'true'
+    systemProperty 'local.k8s.base-url', localBaseUrlProvider.get()
+    systemProperty 'local.k8s.namespace', localNamespaceProvider.get()
+    systemProperty 'kubectl.bin', kubectlExecutableProvider.get()
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
+}
+
+tasks.register('dockerBuildLocalImage') {
+    group = 'infrastructure'
+    description = 'Builds the local Docker image used by kind.'
+    doLast {
+        exec {
+            environment 'DOCKER_BUILDKIT', '0'
+            commandLine 'docker', 'build', '-t', localDockerImageProvider.get(), '.'
+        }
+    }
+}
+
+tasks.register('localClusterUp') {
+    group = 'infrastructure'
+    description = 'Creates or refreshes the local kind cluster and deploys the stack.'
+    dependsOn tasks.named('dockerBuildLocalImage')
+    doLast {
+        String kindExecutable = kindExecutableProvider.get()
+        String kubectlExecutable = kubectlExecutableProvider.get()
+        String clusterName = localClusterNameProvider.get()
+        String namespace = localNamespaceProvider.get()
+        String imageName = localDockerImageProvider.get()
+
+        if (!kindClusterExists(kindExecutable, clusterName)) {
+            logger.lifecycle("Creating kind cluster ${clusterName}")
+            executeCommand([kindExecutable, 'create', 'cluster', '--name', clusterName, '--config', kindConfigFile, '--wait', '180s'])
+        } else {
+            logger.lifecycle("Reusing existing kind cluster ${clusterName}")
+        }
+
+        ByteArrayOutputStream namespaceManifest = new ByteArrayOutputStream()
+        exec {
+            commandLine kubectlExecutable, 'create', 'namespace', namespace, '--dry-run=client', '-o', 'yaml'
+            standardOutput = namespaceManifest
+        }
+        exec {
+            commandLine kubectlExecutable, 'apply', '-f', '-'
+            standardInput = new ByteArrayInputStream(namespaceManifest.toByteArray())
+        }
+
+        executeCommand([kindExecutable, 'load', 'docker-image', imageName, '--name', clusterName])
+        executeCommand([kubectlExecutable, 'apply', '-n', namespace, '-k', 'k8s/local'])
+        executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'restart', 'deployment/redis'])
+        executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'restart', 'deployment/betting-engine'])
+
+        [
+                'kafka',
+                'rocketmq-nameserver',
+                'rocketmq-broker',
+                'redis',
+                'betting-engine',
+                'nginx'
+        ].each { deploymentName ->
+            executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'status', "deployment/${deploymentName}", '--timeout=240s'])
+        }
+
+        executeCommand([
+                kubectlExecutable, '-n', namespace, 'exec', 'deployment/kafka', '--',
+                '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'kafka:9092',
+                '--create', '--if-not-exists', '--topic', 'event-outcomes'
+        ])
+
+        executeCommand([
+                kubectlExecutable, '-n', namespace, 'exec', 'deployment/rocketmq-broker', '--',
+                'sh', '-lc',
+                '/home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-nameserver:9876 -c DefaultCluster -t bet-settlements'
+        ])
+    }
+}
+
+tasks.register('localNamespaceDown') {
+    group = 'infrastructure'
+    description = 'Deletes the local Kubernetes namespace and deployed resources.'
+    doLast {
+        executeCommand([kubectlExecutableProvider.get(), 'delete', 'namespace', localNamespaceProvider.get(), '--ignore-not-found=true', '--wait=true'])
+    }
+}
+
+tasks.register('localClusterDelete') {
+    group = 'infrastructure'
+    description = 'Deletes the local kind cluster.'
+    doLast {
+        String kindExecutable = kindExecutableProvider.get()
+        String clusterName = localClusterNameProvider.get()
+        if (kindClusterExists(kindExecutable, clusterName)) {
+            executeCommand([kindExecutable, 'delete', 'cluster', '--name', clusterName])
+        } else {
+            logger.lifecycle("Kind cluster ${clusterName} does not exist")
+        }
+    }
+}
+
+tasks.register('localK8sVerify') {
+    group = 'verification'
+    description = 'Runs unit, integration, and end-to-end verification against the local kind deployment.'
+    dependsOn tasks.test, tasks.named('integrationTest'), tasks.named('e2eTest')
+}

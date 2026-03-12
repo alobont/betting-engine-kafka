@@ -1,0 +1,237 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+data:
+  server.properties: |
+    process.roles=broker,controller
+    node.id=1
+    controller.quorum.voters=1@kafka:9093
+    listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+    advertised.listeners=PLAINTEXT://kafka:9092
+    listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    controller.listener.names=CONTROLLER
+    inter.broker.listener.name=PLAINTEXT
+    num.partitions=1
+    offsets.topic.replication.factor=1
+    transaction.state.log.replication.factor=1
+    transaction.state.log.min.isr=1
+    group.initial.rebalance.delay.ms=0
+    auto.create.topics.enable=true
+    log.dirs=/var/lib/kafka/data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_HEAP_OPTS
+              value: -Xms256m -Xmx256m
+          ports:
+            - containerPort: 9092
+            - containerPort: 9093
+          command:
+            - /bin/sh
+            - -lc
+          args:
+            - |
+              if [ ! -f /var/lib/kafka/data/meta.properties ]; then
+                /opt/kafka/bin/kafka-storage.sh format -t fEDUwhHpSy6mGFjEtqf7BA -c /opt/kafka/config/kraft/server.properties --ignore-formatted;
+              fi;
+              exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
+          volumeMounts:
+            - name: kafka-config
+              mountPath: /opt/kafka/config/kraft/server.properties
+              subPath: server.properties
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+      volumes:
+        - name: kafka-config
+          configMap:
+            name: kafka-config
+        - name: kafka-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rocketmq-broker-config
+data:
+  broker.conf: |
+    brokerClusterName=DefaultCluster
+    brokerName=broker-a
+    brokerId=0
+    deleteWhen=04
+    fileReservedTime=48
+    brokerRole=ASYNC_MASTER
+    flushDiskType=ASYNC_FLUSH
+    autoCreateTopicEnable=true
+    listenPort=10911
+    namesrvAddr=rocketmq-nameserver:9876
+    brokerIP1=rocketmq-broker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocketmq-nameserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rocketmq-nameserver
+  template:
+    metadata:
+      labels:
+        app: rocketmq-nameserver
+    spec:
+      containers:
+        - name: rocketmq-nameserver
+          image: apache/rocketmq:5.3.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - nameserver
+          env:
+            - name: JAVA_OPT_EXT
+              value: -server -Xms256m -Xmx256m -Xmn128m
+          ports:
+            - containerPort: 9876
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rocketmq-nameserver
+spec:
+  selector:
+    app: rocketmq-nameserver
+  ports:
+    - port: 9876
+      targetPort: 9876
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocketmq-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rocketmq-broker
+  template:
+    metadata:
+      labels:
+        app: rocketmq-broker
+    spec:
+      containers:
+        - name: rocketmq-broker
+          image: apache/rocketmq:5.3.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - broker
+            - -c
+            - /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+          env:
+            - name: JAVA_OPT_EXT
+              value: -server -Xms256m -Xmx256m -Xmn128m
+          ports:
+            - containerPort: 10911
+            - containerPort: 10909
+          volumeMounts:
+            - name: broker-config
+              mountPath: /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+              subPath: broker.conf
+            - name: broker-store
+              mountPath: /home/rocketmq/store
+      volumes:
+        - name: broker-config
+          configMap:
+            name: rocketmq-broker-config
+        - name: broker-store
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rocketmq-broker
+spec:
+  selector:
+    app: rocketmq-broker
+  ports:
+    - name: remoting
+      port: 10911
+      targetPort: 10911
+    - name: fast-remoting
+      port: 10909
+      targetPort: 10909
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379

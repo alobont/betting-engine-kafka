@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package bettingengine;
+
+option java_multiple_files = true;
+option java_package = "com.bettingengine.dto.messaging";
+option java_outer_classname = "MessagingProto";
+
+message EventOutcomeMessage {
+  int64 event_id = 1;
+  string event_name = 2;
+  int64 event_winner_id = 3;
+}
+
+message SettlementMessage {
+  int64 bet_id = 1;
+  int64 user_id = 2;
+  int64 event_id = 3;
+  int64 event_market_id = 4;
+  int64 event_winner_id = 5;
+  string bet_amount = 6;
+}

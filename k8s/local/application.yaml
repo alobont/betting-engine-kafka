@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betting-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: betting-engine
+  template:
+    metadata:
+      labels:
+        app: betting-engine
+    spec:
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until nc -z kafka 9092; do sleep 2; done
+        - name: wait-for-rocketmq
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until nc -z rocketmq-nameserver 9876; do sleep 2; done
+        - name: wait-for-redis
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until nc -z redis 6379; do sleep 2; done
+      containers:
+        - name: betting-engine
+          image: betting-engine:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka:9092
+            - name: ROCKETMQ_NAME_SERVER
+              value: rocketmq-nameserver:9876
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betting-engine
+spec:
+  selector:
+    app: betting-engine
+  ports:
+    - port: 8080
+      targetPort: 8080

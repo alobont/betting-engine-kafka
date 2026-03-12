@@ -1,3 +1,6 @@
 /docs
 *.code-workspace
 .idea
+.gradle/
+build/
+.tools/

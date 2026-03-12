@@ -12,8 +12,7 @@ Required Spring Boot modules and libraries:
 - `spring-boot-starter-validation`
 - `spring-kafka`
 - `org.apache.rocketmq:rocketmq-spring-boot-starter`
-- `spring-boot-starter-data-jpa`
-- `com.h2database:h2`
+- `spring-boot-starter-data-redis`
 - `spring-boot-starter-actuator`
 - `com.google.protobuf:protobuf-java`
 
@@ -45,7 +44,7 @@ Avoid hidden side effects, background magic, or overly abstract orchestration.
 Business rules such as request validation and bet matching should stay in service-layer code that is easy to test without Kafka, RocketMQ, or HTTP concerns.
 
 ## 4. Choose simple data models
-Use small, explicit models. Use Java records for HTTP DTOs, Protobuf-generated message types for Kafka and RocketMQ payloads, and regular JPA entity classes for persisted bets. Use `BigDecimal` for monetary amounts in Java and preserve precision during serialization. Do not use `float` or `double` for money. Do not add fields, polymorphism, or deep inheritance unless a requirement demands it.
+Use small, explicit models. Use Java records for HTTP DTOs, Protobuf-generated message types for Kafka and RocketMQ payloads, and regular classes for Redis-backed bet records. Use `BigDecimal` for monetary amounts in Java and preserve precision during serialization. Do not use `float` or `double` for money. Do not add fields, polymorphism, or deep inheritance unless a requirement demands it.
 
 ## 5. Optimize for correctness before throughput
 The assignment is about clean flow and reliable behavior, not premature scaling. Make the happy path correct, the failure modes visible, and the tests strong.
@@ -104,50 +103,50 @@ The internal message payload must use Protobuf and remain minimal. It must conta
 - The application must not silently drop settlement failures.
 
 # Minimal Internal Design
-Structure the code under root package `com.sporty.bettingengine`. The Spring Boot application class must be `com.sporty.bettingengine.BettingEngineApplication` so component scanning naturally covers the whole application.
+Structure the code under root package `com.bettingengine`. The Spring Boot application class must be `com.bettingengine.BettingEngineApplication` so component scanning naturally covers the whole application.
 
 The package structure must be:
-- `com.sporty.bettingengine.config`
-- `com.sporty.bettingengine.controller`
-- `com.sporty.bettingengine.dto.api`
-- `com.sporty.bettingengine.dto.messaging`
-- `com.sporty.bettingengine.entity`
-- `com.sporty.bettingengine.exception`
-- `com.sporty.bettingengine.messaging.kafka`
-- `com.sporty.bettingengine.messaging.rocketmq`
-- `com.sporty.bettingengine.repository`
-- `com.sporty.bettingengine.service`
+- `com.bettingengine.config`
+- `com.bettingengine.controller`
+- `com.bettingengine.dto.api`
+- `com.bettingengine.dto.messaging`
+- `com.bettingengine.entity`
+- `com.bettingengine.exception`
+- `com.bettingengine.messaging.kafka`
+- `com.bettingengine.messaging.rocketmq`
+- `com.bettingengine.repository`
+- `com.bettingengine.service`
 
 Package responsibilities:
 
-## `com.sporty.bettingengine.config`
-Owns Spring configuration, broker properties, topic properties, Protobuf serialization configuration, and bean wiring that is not handled by auto-configuration.
+## `com.bettingengine.config`
+Owns Spring configuration, broker properties, topic properties, Protobuf serialization configuration, Redis configuration, and bean wiring that is not handled by auto-configuration.
 
-## `com.sporty.bettingengine.controller`
+## `com.bettingengine.controller`
 Owns REST controllers only.
 
-## `com.sporty.bettingengine.dto.api`
+## `com.bettingengine.dto.api`
 Owns HTTP request and response models.
 
-## `com.sporty.bettingengine.dto.messaging`
+## `com.bettingengine.dto.messaging`
 Owns generated Protobuf payload models used by Kafka and RocketMQ. The `.proto` definitions live under `src/main/proto` and generate Java classes into this package.
 
-## `com.sporty.bettingengine.entity`
-Owns JPA entities for the in-memory H2 database.
+## `com.bettingengine.entity`
+Owns bet record classes stored in the in-memory Redis data store.
 
-## `com.sporty.bettingengine.exception`
+## `com.bettingengine.exception`
 Owns application exceptions and global exception handling.
 
-## `com.sporty.bettingengine.messaging.kafka`
+## `com.bettingengine.messaging.kafka`
 Owns Kafka producers, consumers, and Kafka-specific support classes.
 
-## `com.sporty.bettingengine.messaging.rocketmq`
+## `com.bettingengine.messaging.rocketmq`
 Owns RocketMQ producers and RocketMQ-specific support classes.
 
-## `com.sporty.bettingengine.repository`
-Owns Spring Data JPA repositories.
+## `com.bettingengine.repository`
+Owns Redis-backed data access for bets and settlement idempotency claims.
 
-## `com.sporty.bettingengine.service`
+## `com.bettingengine.service`
 Owns business orchestration, validation flow, bet matching, idempotency checks, and coordination between repositories and messaging adapters.
 
 # AI Working Files
@@ -170,7 +169,6 @@ The following are default prohibitions unless a requirement forces them:
 - no microservice split
 - no CQRS split
 - no event sourcing
-- no ORM-driven persistence model beyond straightforward Spring Data JPA
 - no generic repository hierarchy
 - no custom internal messaging abstraction over Kafka and RocketMQ
 - no complicated retry framework
@@ -180,23 +178,29 @@ The following are default prohibitions unless a requirement forces them:
 If a design choice makes the code harder to explain than the requirement itself, it is probably too complex.
 
 # Data Storage Guidance
-Use an in-memory H2 database for bets as required.
+Use Redis as the in-memory database for bets.
 
 Approach:
-- model bets as JPA entities in `com.sporty.bettingengine.entity`
+- model bets as regular classes in `com.bettingengine.entity`
 - represent monetary amounts in Java with `BigDecimal`
-- access bets through Spring Data JPA repositories in `com.sporty.bettingengine.repository`
-- seed a small deterministic bet dataset at startup with `data.sql` or a startup initializer
+- access bets through Redis-backed repositories in `com.bettingengine.repository`
+- seed a small deterministic bet dataset at startup into Redis
 
-Do not introduce an external database.
+Do not introduce H2 for bet storage.
 
 # Delivery Semantics and Idempotency
 Because messaging systems can redeliver messages, settlement processing must avoid creating inconsistent duplicate side effects.
 
 Minimum acceptable strategy:
 - derive a stable settlement key from `betId` and `eventId`
-- ensure the application can detect and avoid duplicate settlement sends during a single runtime
+- claim settlement keys through Redis with atomic set-if-absent semantics and a bounded TTL
+- ensure the application can detect and avoid duplicate settlement sends across pods and processes
 - make duplicate detection explicit in code and tests
+
+If any local guard, lock, map, semaphore, or cache remains in the processing path:
+- it must be safe for concurrent access within a pod
+- it must be treated only as a process-local optimization
+- it must never be the correctness boundary across threads, JVM processes, or Kubernetes pods
 
 If a stronger guarantee is needed later, add it deliberately rather than hiding it behind abstractions.
 
@@ -208,12 +212,13 @@ Rules:
 - Kafka publish failures fail the request path clearly
 - Kafka consume failures are logged with enough context to diagnose the broken message
 - settlement publish failures are retried only in a controlled and understandable way
+- Redis idempotency failures are logged with enough context to distinguish duplicates from infrastructure problems
 - do not swallow exceptions
 - do not add fallback behavior that changes business meaning
 
 # Observability
 Keep observability practical:
-- structured logs for request receipt, Kafka publish, Kafka consume, bet match count, and RocketMQ publish
+- structured logs for request receipt, Kafka publish, Kafka consume, bet match count, Redis idempotency claim, and RocketMQ publish
 - health endpoint for service liveness/readiness
 - basic metrics if the chosen stack supports them cheaply
 
@@ -228,12 +233,14 @@ Cover controller validation and service-layer rules:
 - request validation
 - matching by `eventId`
 - duplicate handling behavior
+- safe concurrent behavior for any remaining local guards or locks
 
 ## Integration tests
 Cover adapters and end-to-end behavior with realistic boundaries:
 - API to Kafka publish
 - Kafka consume to bet lookup
-- bet lookup to RocketMQ publish
+- bet lookup to Redis idempotency claim
+- successful Redis claim to RocketMQ publish
 
 ## Contract-level checks
 Verify message schemas remain stable and explicit.
@@ -257,6 +264,7 @@ Prefer a smaller number of high-value tests over a large number of brittle tests
 
 ## Configuration
 - centralize topic names and broker settings
+- centralize Redis settings for bet storage and settlement-key TTL
 - keep defaults local-development friendly
 - avoid scattering magic strings such as `event-outcomes` and `bet-settlements`
 
@@ -287,6 +295,7 @@ Minimum deployment topology:
 - one deployment for the betting engine service
 - Kafka accessible inside the cluster
 - RocketMQ accessible inside the cluster
+- a dedicated Redis deployment and service for the in-memory bet store and settlement idempotency
 - an `nginx` deployment in front of externally exposed HTTP traffic
 
 Do not expose the application directly through `NodePort` when an nginx-based external entry point is expected.
@@ -296,7 +305,7 @@ Keep manifests straightforward. Favor readability over heavy templating unless d
 # Non-Goals
 Unless requirements change, the system does not need to implement:
 - user authentication or authorization
-- persistent bet storage beyond the required in-memory H2 database
+- persistent bet storage beyond the required in-memory Redis database
 - odds calculation
 - payout calculation
 - complex market rules

@@ -1,80 +1,91 @@
 # Betting Engine Kafka
 
-This repository targets a local Kubernetes workflow that is fast to start, test, and remove on both:
-- Windows with Docker Desktop
-- Linux with Docker Engine or Docker Desktop
+This project uses:
+- Java 21
+- Spring Boot
+- Gradle
+- Redis for the in-memory bet store and settlement idempotency claims
+- `kind` for the local Kubernetes cluster
 
-The local Kubernetes standard is `kind`.
+The local Kubernetes workflow is standardized around the Gradle wrapper so Windows with Docker Desktop and Linux both use the same one-line commands.
 
 ## Prerequisites
-- Java 21
+- Java 21 available through `JAVA_HOME`
 - Docker Desktop on Windows, or Docker Engine / Docker Desktop on Linux
-- `kind`
 - `kubectl`
-- the project build wrapper once the application is implemented
+- `kind`
 
-Local defaults used in this README:
+If `kind` or `kubectl` are not on `PATH`, pass them explicitly:
+- `-Pkind.bin=/absolute/path/to/kind`
+- `-Pkubectl.bin=/absolute/path/to/kubectl`
+
+Local defaults:
 - cluster name: `betting-engine-local`
 - namespace: `betting-engine-local`
-- Kubernetes manifests: `k8s/local`
+- exposed HTTP entry point: `http://localhost:8080`
 
 ## Start the local cluster and deploy the stack
 
 Windows PowerShell:
 
 ```powershell
-kind create cluster --name betting-engine-local --wait 120s; if ($?) { kubectl create namespace betting-engine-local --dry-run=client -o yaml | kubectl apply -f - }; if ($?) { kubectl apply -n betting-engine-local -k .\k8s\local }
+.\gradlew.bat localClusterUp
 ```
 
 Linux:
 
 ```bash
-kind create cluster --name betting-engine-local --wait 120s && kubectl create namespace betting-engine-local --dry-run=client -o yaml | kubectl apply -f - && kubectl apply -n betting-engine-local -k ./k8s/local
+./gradlew localClusterUp
 ```
 
-The implementation should keep this workflow one-line and fast. The local manifests should deploy:
-- the betting engine service
-- Kafka
-- RocketMQ
-- `nginx`
+What this does:
+- creates or reuses the `kind` cluster
+- builds the local Docker image
+- loads the image into `kind`
+- deploys Kafka, RocketMQ, Redis, the betting engine service, and `nginx`
+- refreshes the Redis-backed in-memory dataset by restarting Redis and the betting engine deployment
+- creates the required `event-outcomes` Kafka topic and `bet-settlements` RocketMQ topic
 
 ## Run tests
 
-Integration tests must run against the local Kubernetes deployment, not only isolated unit or container tests. The implementation should provide a one-line wrapper command for this workflow.
-
-Expected Windows command shape:
-
-```powershell
-.\mvnw.cmd verify -Plocal-k8s -Dk8s.cluster.name=betting-engine-local -Dk8s.namespace=betting-engine-local
-```
-
-Expected Linux command shape:
-
-```bash
-./mvnw verify -Plocal-k8s -Dk8s.cluster.name=betting-engine-local -Dk8s.namespace=betting-engine-local
-```
-
-If Gradle is chosen instead of Maven, provide an equivalent one-line wrapper command and keep this README updated.
-
-End-to-end verification should confirm:
-- the HTTP API accepts an event outcome
-- the service publishes to Kafka topic `event-outcomes`
-- the Kafka consumer finds matching bets from the in-memory database
-- the service publishes settlement messages to RocketMQ topic `bet-settlements`
-- the deployed Kubernetes resources are healthy
-
-## Remove the local deployment or namespace
+Run the full verification flow:
 
 Windows PowerShell:
 
 ```powershell
-kubectl delete namespace betting-engine-local --ignore-not-found=true
+.\gradlew.bat localK8sVerify
 ```
 
 Linux:
 
 ```bash
-kubectl delete namespace betting-engine-local --ignore-not-found=true
+./gradlew localK8sVerify
+```
+
+This runs:
+- unit tests
+- integration tests
+- local Kubernetes integration checks against the deployed resources
+- end-to-end verification through `nginx`
+
+The deployed HTTP entry point is:
+
+```text
+http://localhost:8080/event-outcomes
+```
+
+## Remove the deployed namespace
+
+Windows PowerShell:
+
+```powershell
+.\gradlew.bat localNamespaceDown
+```
+
+Linux:
+
+```bash
+./gradlew localNamespaceDown
 ```
 
 Use this when you want to clear the deployed resources but keep the cluster.
@@ -84,13 +95,13 @@ Use this when you want to clear the deployed resources but keep the cluster.
 Windows PowerShell:
 
 ```powershell
-kubectl delete namespace betting-engine-local --ignore-not-found=true; kind delete cluster --name betting-engine-local
+.\gradlew.bat localClusterDelete
 ```
 
 Linux:
 
 ```bash
-kubectl delete namespace betting-engine-local --ignore-not-found=true && kind delete cluster --name betting-engine-local
+./gradlew localClusterDelete
 ```
 
-Use this when you want a full local reset.
+Use this for a full local reset.
