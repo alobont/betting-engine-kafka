@@ -1,4 +1,5 @@
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 
 plugins {
     id 'java'
@@ -14,14 +15,22 @@ ext {
     protobufVersion = '4.29.1'
     rocketmqSpringVersion = '2.3.4'
     awaitilityVersion = '4.2.2'
+    kindVersion = 'v0.31.0'
 }
 
 def localClusterNameProvider = providers.gradleProperty('k8s.cluster.name').orElse('betting-engine-local')
 def localNamespaceProvider = providers.gradleProperty('k8s.namespace').orElse('betting-engine-local')
 def localDockerImageProvider = providers.gradleProperty('docker.image').orElse('betting-engine:local')
 def localBaseUrlProvider = providers.gradleProperty('local.k8s.base-url').orElse('http://localhost:8080')
-def kindExecutableProvider = providers.gradleProperty('kind.bin').orElse(System.getenv('KIND_BIN') ?: 'kind')
-def kubectlExecutableProvider = providers.gradleProperty('kubectl.bin').orElse(System.getenv('KUBECTL_BIN') ?: 'kubectl')
+def operatingSystemName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def architectureName = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+def managedToolsDirectory = layout.projectDirectory.dir('.tools').asFile
+def managedKindExecutable = new File(managedToolsDirectory, operatingSystemName.contains('windows') ? 'kind.exe' : 'kind')
+def bundledKubectlExecutable = new File('C:/Program Files/Docker/Docker/resources/bin/kubectl.exe')
+def kindVersionProvider = providers.gradleProperty('kind.version').orElse(kindVersion)
+def kindExecutableProvider = providers.gradleProperty('kind.bin').orElse(System.getenv('KIND_BIN') ?: managedKindExecutable.absolutePath)
+def kubectlExecutableProvider = providers.gradleProperty('kubectl.bin')
+        .orElse(System.getenv('KUBECTL_BIN') ?: (bundledKubectlExecutable.exists() ? bundledKubectlExecutable.absolutePath : 'kubectl'))
 def kindConfigFile = layout.projectDirectory.file('k8s/kind/kind-config.yaml').asFile.absolutePath
 
 def executeCommand = { List<String> command ->
@@ -47,6 +56,26 @@ def kindClusterExists = { String kindExecutable, String clusterName ->
     } catch (Exception ignored) {
         false
     }
+}
+
+def kindPlatform = {
+    String normalizedArchitecture
+    if (architectureName in ['amd64', 'x86_64', 'x64']) {
+        normalizedArchitecture = 'amd64'
+    } else if (architectureName in ['arm64', 'aarch64']) {
+        normalizedArchitecture = 'arm64'
+    } else {
+        throw new GradleException("Unsupported architecture for managed kind download: ${System.getProperty('os.arch')}")
+    }
+
+    if (operatingSystemName.contains('windows')) {
+        return "windows-${normalizedArchitecture}"
+    }
+    if (operatingSystemName.contains('linux')) {
+        return "linux-${normalizedArchitecture}"
+    }
+
+    throw new GradleException("Unsupported operating system for managed kind download: ${System.getProperty('os.name')}")
 }
 
 java {
@@ -155,10 +184,48 @@ tasks.register('dockerBuildLocalImage') {
     }
 }
 
+tasks.register('ensureKind') {
+    group = 'infrastructure'
+    description = 'Ensures kind is available locally, downloading it into .tools when using the managed path.'
+    doLast {
+        File configuredKindExecutable = new File(kindExecutableProvider.get())
+        if (configuredKindExecutable.absolutePath != managedKindExecutable.absolutePath) {
+            logger.lifecycle("Using externally configured kind executable ${configuredKindExecutable.absolutePath}")
+            return
+        }
+
+        if (managedKindExecutable.exists()) {
+            logger.lifecycle("Using managed kind executable ${managedKindExecutable.absolutePath}")
+            return
+        }
+
+        managedToolsDirectory.mkdirs()
+        String downloadUrl = "https://kind.sigs.k8s.io/dl/${kindVersionProvider.get()}/kind-${kindPlatform()}"
+        logger.lifecycle("Downloading kind ${kindVersionProvider.get()} to ${managedKindExecutable.absolutePath}")
+
+        try {
+            new URL(downloadUrl).withInputStream { input ->
+                managedKindExecutable.withOutputStream { output ->
+                    output << input
+                }
+            }
+        } catch (IOException exception) {
+            managedKindExecutable.delete()
+            throw new GradleException("Failed to download kind from ${downloadUrl}", exception)
+        }
+
+        if (!operatingSystemName.contains('windows') && !managedKindExecutable.setExecutable(true, false)) {
+            throw new GradleException("Failed to mark ${managedKindExecutable.absolutePath} as executable")
+        }
+
+        logger.lifecycle("kind is available at ${managedKindExecutable.absolutePath}")
+    }
+}
+
 tasks.register('localClusterUp') {
     group = 'infrastructure'
     description = 'Creates or refreshes the local kind cluster and deploys the stack.'
-    dependsOn tasks.named('dockerBuildLocalImage')
+    dependsOn tasks.named('ensureKind'), tasks.named('dockerBuildLocalImage')
     doLast {
         String kindExecutable = kindExecutableProvider.get()
         String kubectlExecutable = kubectlExecutableProvider.get()

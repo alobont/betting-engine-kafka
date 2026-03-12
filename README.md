@@ -13,11 +13,15 @@ The local Kubernetes workflow is standardized around the Gradle wrapper so Windo
 - Java 21 available through `JAVA_HOME`
 - Docker Desktop on Windows, or Docker Engine / Docker Desktop on Linux
 - `kubectl`
-- `kind`
 
-If `kind` or `kubectl` are not on `PATH`, pass them explicitly:
+`kind` does not need to be installed globally. `localClusterUp` downloads the pinned platform-specific `kind` binary into `.tools/` automatically on first use and reuses it afterward.
+
+If you want to override the managed `kind` binary or `kubectl` is not on `PATH`, pass them explicitly:
 - `-Pkind.bin=/absolute/path/to/kind`
 - `-Pkubectl.bin=/absolute/path/to/kubectl`
+
+Optional override:
+- `-Pkind.version=v0.31.0`
 
 Local defaults:
 - cluster name: `betting-engine-local`
@@ -40,6 +44,7 @@ Linux:
 
 What this does:
 - creates or reuses the `kind` cluster
+- downloads `kind` into `.tools/` if the managed binary is missing
 - builds the local Docker image
 - loads the image into `kind`
 - deploys Kafka, RocketMQ, Redis, the betting engine service, and `nginx`
