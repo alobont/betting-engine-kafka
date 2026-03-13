@@ -114,6 +114,64 @@ Linux, HA mode:
 - local Kubernetes verification against deployed resources
 - end-to-end verification through `nginx`
 
+## Manually exercise the deployed stack
+
+Examples below use the default local mode values:
+- `CTX=kind-betting-engine-local`
+- `NS=betting-engine-local`
+- `BASE_URL=http://localhost:8080`
+- `KAFKA_EXEC=deployment/kafka`
+- `KAFKA_BOOTSTRAP=kafka:9092`
+- `SETTLEMENT_KEY=6:4004`
+
+If you started HA mode, replace them with:
+- `CTX=kind-betting-engine-local-ha`
+- `NS=betting-engine-local-ha`
+- `BASE_URL=http://localhost:8081`
+- `KAFKA_EXEC=kafka-0`
+- `KAFKA_BOOTSTRAP=kafka-bootstrap:9092`
+- `SETTLEMENT_KEY=6:4004`
+
+Kafka and RocketMQ messages are Protobuf-encoded. The topic tools below show the stored records and metadata, while the betting-engine logs show the decoded event and settlement flow.
+
+Windows PowerShell:
+
+```powershell
+$CTX = 'kind-betting-engine-local'
+$NS = 'betting-engine-local'
+$BASE_URL = 'http://localhost:8080'
+$KAFKA_EXEC = 'deployment/kafka'
+$KAFKA_BOOTSTRAP = 'kafka:9092'
+$ROCKETMQ_NS_POD = kubectl --context $CTX -n $NS get pod -l app=rocketmq-nameserver -o jsonpath="{.items[0].metadata.name}"
+$SETTLEMENT_KEY = '6:4004' # BET_ID:EVENT_ID
+
+$correlationId = [guid]::NewGuid().ToString()
+Invoke-WebRequest -Method Post -Uri "$BASE_URL/event-outcomes" -Headers @{ 'X-Correlation-Id' = $correlationId } -ContentType 'application/json' -Body '{"eventId":4004,"eventName":"League Decider","eventWinnerId":31}'
+kubectl --context $CTX -n $NS logs -l app=betting-engine --tail=200 --prefix=true | Select-String $correlationId
+kubectl --context $CTX -n $NS exec $KAFKA_EXEC -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP --topic event-outcomes --from-beginning --max-messages 5 --property print.key=true
+kubectl --context $CTX -n $NS exec ignite-0 -- docker-entrypoint.sh cli sql --jdbc-url "jdbc:ignite:thin://ignite-client:10800" --plain "SELECT BET_ID, USER_ID, EVENT_ID, EVENT_MARKET_ID, EVENT_WINNER_ID, BET_AMOUNT FROM BETS WHERE EVENT_ID = 4004 ORDER BY BET_ID"
+kubectl --context $CTX -n $NS exec $ROCKETMQ_NS_POD -- sh -lc "/home/rocketmq/rocketmq-5.3.2/bin/mqadmin queryMsgByKey -n 'localhost:9876' -t bet-settlements -k '$SETTLEMENT_KEY'"
+```
+
+Linux:
+
+```bash
+CTX=kind-betting-engine-local
+NS=betting-engine-local
+BASE_URL=http://localhost:8080
+KAFKA_EXEC=deployment/kafka
+KAFKA_BOOTSTRAP=kafka:9092
+ROCKETMQ_NS_POD=$(kubectl --context "$CTX" -n "$NS" get pod -l app=rocketmq-nameserver -o jsonpath='{.items[0].metadata.name}')
+SETTLEMENT_KEY=6:4004 # BET_ID:EVENT_ID
+
+correlation_id=$(uuidgen)
+curl -i -X POST "$BASE_URL/event-outcomes" -H "Content-Type: application/json" -H "X-Correlation-Id: $correlation_id" -d '{"eventId":4004,"eventName":"League Decider","eventWinnerId":31}'
+kubectl --context "$CTX" -n "$NS" logs -l app=betting-engine --tail=200 --prefix=true | grep "$correlation_id"
+kubectl --context "$CTX" -n "$NS" exec "$KAFKA_EXEC" -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --topic event-outcomes --from-beginning --max-messages 5 --property print.key=true
+kubectl --context "$CTX" -n "$NS" exec ignite-0 -- docker-entrypoint.sh cli sql --jdbc-url "jdbc:ignite:thin://ignite-client:10800" --plain "SELECT BET_ID, USER_ID, EVENT_ID, EVENT_MARKET_ID, EVENT_WINNER_ID, BET_AMOUNT FROM BETS WHERE EVENT_ID = 4004 ORDER BY BET_ID"
+kubectl --context "$CTX" -n "$NS" exec "$ROCKETMQ_NS_POD" -- sh -lc "/home/rocketmq/rocketmq-5.3.2/bin/mqadmin queryMsgByKey -n 'localhost:9876' -t bet-settlements -k '$SETTLEMENT_KEY'"
+```
+
 ## Remove the deployed namespace
 
 Windows PowerShell, default mode:
