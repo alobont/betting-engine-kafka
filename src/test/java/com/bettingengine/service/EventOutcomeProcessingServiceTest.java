@@ -46,7 +46,7 @@ class EventOutcomeProcessingServiceTest {
     }
 
     @Test
-    void shouldSkipDuplicateSettlementKeysWhenRedisClaimAlreadyExists() {
+    void shouldSkipDuplicateSettlementKeysWhenIgniteClaimAlreadyExists() {
         when(betRepository.findByEventId(1001L)).thenReturn(List.of(
                 bet(1L, 101L, 1001L, 501L, 10L, "12.50")
         ));
@@ -59,7 +59,7 @@ class EventOutcomeProcessingServiceTest {
     }
 
     @Test
-    void shouldReleaseRedisClaimWhenSettlementPublishFails() {
+    void shouldReleaseIgniteClaimWhenSettlementPublishFails() {
         when(betRepository.findByEventId(1001L)).thenReturn(List.of(
                 bet(1L, 101L, 1001L, 501L, 10L, "12.50")
         ));

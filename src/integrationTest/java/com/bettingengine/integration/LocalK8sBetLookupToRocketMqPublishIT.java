@@ -10,12 +10,13 @@ class LocalK8sBetLookupToRocketMqPublishIT extends LocalKubernetesTestSupport {
     void shouldPublishSettlementMessagesInsideLocalKindCluster() throws Exception {
         assumeLocalKubernetesEnabled();
 
+        clearSettlementClaims(3003L);
         String correlationId = uniqueCorrelationId("local-rocketmq");
         var response = publishOutcome(3003L, "Cup Semi Final", 21L, correlationId);
 
         assertThat(response.statusCode()).isEqualTo(202);
         waitForAsyncProcessing();
-        assertLogContains(correlationId, "Redis settlement claim eventId=3003");
+        assertLogContains(correlationId, "Ignite settlement claim eventId=3003");
         assertSettlementLogCount(correlationId, 2);
     }
 }

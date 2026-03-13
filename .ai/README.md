@@ -9,6 +9,7 @@ Files:
 
 Rules:
 - the AI must review `SPEC_CHECKLIST.md` before starting implementation work
+- the AI must keep `SPEC_CHECKLIST.md` aligned with the current `AGENTS.md` architecture; if the architecture changes, the checklist must be updated before further implementation work continues
 - the AI must update `SPEC_CHECKLIST.md` as work is completed
 - the AI must add brief notes to `PROGRESS_NOTES.md` during meaningful progress
 - the AI should capture generalized lessons in `LESSONS_LEARNED.md` when mistakes, corrections, or useful patterns emerge

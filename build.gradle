@@ -14,14 +14,36 @@ version = '0.0.1-SNAPSHOT'
 ext {
     protobufVersion = '4.29.1'
     rocketmqSpringVersion = '2.3.4'
+    igniteVersion = '3.1.0'
     awaitilityVersion = '4.2.2'
     kindVersion = 'v0.31.0'
 }
 
-def localClusterNameProvider = providers.gradleProperty('k8s.cluster.name').orElse('betting-engine-local')
-def localNamespaceProvider = providers.gradleProperty('k8s.namespace').orElse('betting-engine-local')
+def localHaEnabled = providers.gradleProperty('local.ha').map { it.toBoolean() }.orElse(false).get()
+def defaultClusterName = localHaEnabled ? 'betting-engine-local-ha' : 'betting-engine-local'
+def defaultNamespace = localHaEnabled ? 'betting-engine-local-ha' : 'betting-engine-local'
+def defaultKubectlContext = "kind-${defaultClusterName}"
+def defaultManifestPath = localHaEnabled ? 'k8s/local-ha' : 'k8s/local'
+def defaultKindConfigPath = localHaEnabled ? 'k8s/kind/kind-config-ha.yaml' : 'k8s/kind/kind-config.yaml'
+def defaultKafkaBootstrapServer = localHaEnabled ? 'kafka-bootstrap:9092' : 'kafka:9092'
+def defaultBaseUrl = localHaEnabled ? 'http://localhost:8081' : 'http://localhost:8080'
+def defaultIgniteClientAddress = localHaEnabled ? '127.0.0.1:10801' : '127.0.0.1:10800'
+def defaultRocketMqNameServer = localHaEnabled
+        ? 'rocketmq-nameserver-0.rocketmq-nameserver:9876;rocketmq-nameserver-1.rocketmq-nameserver:9876'
+        : 'rocketmq-nameserver:9876'
+def defaultKafkaTopicPartitions = localHaEnabled ? '3' : '1'
+def defaultKafkaTopicReplicationFactor = localHaEnabled ? '3' : '1'
+def defaultKafkaExecTarget = localHaEnabled ? 'kafka-0' : 'deployment/kafka'
+def defaultRocketMqExecTarget = localHaEnabled ? 'deployment/rocketmq-broker-a-master' : 'deployment/rocketmq-broker'
+def defaultIgniteNodeNames = localHaEnabled ? ['ignite-0', 'ignite-1', 'ignite-2'] : ['ignite-0']
+def requiredControlPlanePortMappings = localHaEnabled ? ['30081/tcp', '30082/tcp'] : ['30080/tcp', '30082/tcp']
+def localClusterNameProvider = providers.gradleProperty('k8s.cluster.name').orElse(defaultClusterName)
+def localNamespaceProvider = providers.gradleProperty('k8s.namespace').orElse(defaultNamespace)
 def localDockerImageProvider = providers.gradleProperty('docker.image').orElse('betting-engine:local')
-def localBaseUrlProvider = providers.gradleProperty('local.k8s.base-url').orElse('http://localhost:8080')
+def localBaseUrlProvider = providers.gradleProperty('local.k8s.base-url').orElse(defaultBaseUrl)
+def localIgniteClientAddressProvider = providers.gradleProperty('local.k8s.ignite-addresses').orElse(defaultIgniteClientAddress)
+def kubectlContextProvider = providers.gradleProperty('kubectl.context').orElse(defaultKubectlContext)
+def localManifestPathProvider = providers.gradleProperty('local.k8s.manifests').orElse(defaultManifestPath)
 def operatingSystemName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
 def architectureName = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
 def managedToolsDirectory = layout.projectDirectory.dir('.tools').asFile
@@ -31,11 +53,49 @@ def kindVersionProvider = providers.gradleProperty('kind.version').orElse(kindVe
 def kindExecutableProvider = providers.gradleProperty('kind.bin').orElse(System.getenv('KIND_BIN') ?: managedKindExecutable.absolutePath)
 def kubectlExecutableProvider = providers.gradleProperty('kubectl.bin')
         .orElse(System.getenv('KUBECTL_BIN') ?: (bundledKubectlExecutable.exists() ? bundledKubectlExecutable.absolutePath : 'kubectl'))
-def kindConfigFile = layout.projectDirectory.file('k8s/kind/kind-config.yaml').asFile.absolutePath
+def kindConfigFile = layout.projectDirectory.file(defaultKindConfigPath).asFile.absolutePath
+def kafkaRestartTarget = localHaEnabled ? 'statefulset/kafka' : 'deployment/kafka'
+def igniteRestartTarget = 'statefulset/ignite'
+def infrastructureRolloutTargets = localHaEnabled
+        ? [
+        'statefulset/kafka',
+        'statefulset/ignite',
+        'statefulset/rocketmq-nameserver',
+        'deployment/rocketmq-broker-a-master',
+        'deployment/rocketmq-broker-a-slave',
+        'deployment/rocketmq-broker-b-master',
+        'deployment/rocketmq-broker-b-slave'
+]
+        : [
+        'deployment/kafka',
+        'deployment/rocketmq-nameserver',
+        'deployment/rocketmq-broker',
+        'statefulset/ignite'
+]
+def applicationRolloutTargets = ['deployment/betting-engine', 'deployment/nginx']
 
 def executeCommand = { List<String> command ->
     exec {
         commandLine command
+    }
+}
+
+def retryCommand = { int maxAttempts, delayMillis, List<String> command ->
+    Exception lastFailure = null
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            executeCommand(command)
+            return
+        } catch (Exception exception) {
+            lastFailure = exception
+            if (attempt == maxAttempts) {
+                throw exception
+            }
+            Thread.sleep(delayMillis as long)
+        }
+    }
+    if (lastFailure != null) {
+        throw lastFailure
     }
 }
 
@@ -48,11 +108,40 @@ def captureCommandOutput = { List<String> command ->
     stdout.toString(StandardCharsets.UTF_8).trim()
 }
 
+def captureCommandOutputAllowingFailure = { List<String> command ->
+    ByteArrayOutputStream stdout = new ByteArrayOutputStream()
+    exec {
+        commandLine command
+        standardOutput = stdout
+        errorOutput = stdout
+        ignoreExitValue = true
+    }
+    stdout.toString(StandardCharsets.UTF_8).trim()
+}
+
 def kindClusterExists = { String kindExecutable, String clusterName ->
     try {
         captureCommandOutput([kindExecutable, 'get', 'clusters'])
                 .readLines()
                 .contains(clusterName)
+    } catch (Exception ignored) {
+        false
+    }
+}
+
+def kindClusterHasRequiredPortMappings = { String clusterName, List<String> requiredPorts ->
+    try {
+        String portOutput = captureCommandOutput(['docker', 'port', "${clusterName}-control-plane"])
+        requiredPorts.every { requiredPort -> portOutput.contains(requiredPort) }
+    } catch (Exception ignored) {
+        false
+    }
+}
+
+def commandSucceeds = { List<String> command ->
+    try {
+        executeCommand(command)
+        true
     } catch (Exception ignored) {
         false
     }
@@ -116,10 +205,10 @@ sourceSets {
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
-    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.kafka:spring-kafka'
     implementation "org.apache.rocketmq:rocketmq-spring-boot-starter:${rocketmqSpringVersion}"
+    implementation "org.apache.ignite:ignite-client:${igniteVersion}"
     implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
@@ -150,9 +239,12 @@ tasks.register('integrationTest', Test) {
     shouldRunAfter tasks.test
     useJUnitPlatform()
     systemProperty 'local.k8s.enabled', 'true'
+    systemProperty 'local.k8s.ha', String.valueOf(localHaEnabled)
     systemProperty 'local.k8s.base-url', localBaseUrlProvider.get()
     systemProperty 'local.k8s.namespace', localNamespaceProvider.get()
+    systemProperty 'local.k8s.ignite-addresses', localIgniteClientAddressProvider.get()
     systemProperty 'kubectl.bin', kubectlExecutableProvider.get()
+    systemProperty 'kubectl.context', kubectlContextProvider.get()
 }
 
 tasks.register('e2eTest', Test) {
@@ -164,9 +256,12 @@ tasks.register('e2eTest', Test) {
     shouldRunAfter tasks.named('integrationTest')
     useJUnitPlatform()
     systemProperty 'local.k8s.enabled', 'true'
+    systemProperty 'local.k8s.ha', String.valueOf(localHaEnabled)
     systemProperty 'local.k8s.base-url', localBaseUrlProvider.get()
     systemProperty 'local.k8s.namespace', localNamespaceProvider.get()
+    systemProperty 'local.k8s.ignite-addresses', localIgniteClientAddressProvider.get()
     systemProperty 'kubectl.bin', kubectlExecutableProvider.get()
+    systemProperty 'kubectl.context', kubectlContextProvider.get()
 }
 
 tasks.named('check') {
@@ -176,10 +271,11 @@ tasks.named('check') {
 tasks.register('dockerBuildLocalImage') {
     group = 'infrastructure'
     description = 'Builds the local Docker image used by kind.'
+    dependsOn tasks.named('bootJar')
     doLast {
         exec {
             environment 'DOCKER_BUILDKIT', '0'
-            commandLine 'docker', 'build', '-t', localDockerImageProvider.get(), '.'
+            commandLine 'docker', 'build', '--pull=false', '-t', localDockerImageProvider.get(), '.'
         }
     }
 }
@@ -229,9 +325,24 @@ tasks.register('localClusterUp') {
     doLast {
         String kindExecutable = kindExecutableProvider.get()
         String kubectlExecutable = kubectlExecutableProvider.get()
+        String kubectlContext = kubectlContextProvider.get()
         String clusterName = localClusterNameProvider.get()
         String namespace = localNamespaceProvider.get()
         String imageName = localDockerImageProvider.get()
+        String manifestPath = localManifestPathProvider.get()
+        String infrastructureManifest = layout.projectDirectory.file("${manifestPath}/infrastructure.yaml").asFile.absolutePath
+        String applicationManifest = layout.projectDirectory.file("${manifestPath}/application.yaml").asFile.absolutePath
+        String nginxManifest = layout.projectDirectory.file("${manifestPath}/nginx.yaml").asFile.absolutePath
+        String igniteRestUrl = 'http://ignite-0.ignite:10300'
+        List<String> igniteNodeNames = defaultIgniteNodeNames
+
+        logger.lifecycle("Deploying local Kubernetes stack in ${localHaEnabled ? 'HA' : 'non-HA'} mode")
+
+        if (kindClusterExists(kindExecutable, clusterName)
+                && !kindClusterHasRequiredPortMappings(clusterName, requiredControlPlanePortMappings)) {
+            logger.lifecycle("Recreating kind cluster ${clusterName} because required control-plane port mappings are missing")
+            executeCommand([kindExecutable, 'delete', 'cluster', '--name', clusterName])
+        }
 
         if (!kindClusterExists(kindExecutable, clusterName)) {
             logger.lifecycle("Creating kind cluster ${clusterName}")
@@ -240,43 +351,80 @@ tasks.register('localClusterUp') {
             logger.lifecycle("Reusing existing kind cluster ${clusterName}")
         }
 
+        executeCommand([
+                kubectlExecutable, '--context', kubectlContext,
+                'delete', 'namespace', namespace,
+                '--ignore-not-found=true',
+                '--wait=true'
+        ])
+
         ByteArrayOutputStream namespaceManifest = new ByteArrayOutputStream()
         exec {
-            commandLine kubectlExecutable, 'create', 'namespace', namespace, '--dry-run=client', '-o', 'yaml'
+            commandLine kubectlExecutable, '--context', kubectlContext, 'create', 'namespace', namespace, '--dry-run=client', '-o', 'yaml'
             standardOutput = namespaceManifest
         }
         exec {
-            commandLine kubectlExecutable, 'apply', '-f', '-'
+            commandLine kubectlExecutable, '--context', kubectlContext, 'apply', '-f', '-'
             standardInput = new ByteArrayInputStream(namespaceManifest.toByteArray())
         }
 
         executeCommand([kindExecutable, 'load', 'docker-image', imageName, '--name', clusterName])
-        executeCommand([kubectlExecutable, 'apply', '-n', namespace, '-k', 'k8s/local'])
-        executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'restart', 'deployment/redis'])
-        executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'restart', 'deployment/betting-engine'])
+        executeCommand([kubectlExecutable, '--context', kubectlContext, 'apply', '-n', namespace, '-f', infrastructureManifest])
+        executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'restart', kafkaRestartTarget])
+        executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'restart', igniteRestartTarget])
 
-        [
-                'kafka',
-                'rocketmq-nameserver',
-                'rocketmq-broker',
-                'redis',
-                'betting-engine',
-                'nginx'
-        ].each { deploymentName ->
-            executeCommand([kubectlExecutable, '-n', namespace, 'rollout', 'status', "deployment/${deploymentName}", '--timeout=240s'])
+        infrastructureRolloutTargets.each { rolloutTarget ->
+            executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'status', rolloutTarget, '--timeout=420s'])
         }
 
-        executeCommand([
-                kubectlExecutable, '-n', namespace, 'exec', 'deployment/kafka', '--',
-                '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'kafka:9092',
-                '--create', '--if-not-exists', '--topic', 'event-outcomes'
+        List<String> igniteStatusCommand = [
+                kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'exec', 'ignite-0', '--',
+                'sh', '-lc', "docker-entrypoint.sh cli cluster status --url ${igniteRestUrl} 2>&1 || true"
+        ]
+        String igniteStatusOutput = captureCommandOutputAllowingFailure(igniteStatusCommand)
+        logger.lifecycle(igniteStatusOutput)
+        if (igniteStatusOutput.toLowerCase(Locale.ROOT).contains('not initialized')) {
+            executeCommand([
+                    kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'exec', 'ignite-0', '--',
+                    'docker-entrypoint.sh', 'cli', 'cluster', 'init',
+                    '--url', igniteRestUrl,
+                    '--name', clusterName,
+                    '--metastorage-group', igniteNodeNames.join(','),
+                    '--cluster-management-group', igniteNodeNames.join(',')
+            ])
+        }
+
+        retryCommand(24, 5000L, [
+                kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'exec', 'ignite-0', '--',
+                'sh', '-lc', "docker-entrypoint.sh cli cluster status --url ${igniteRestUrl} 2>&1 | grep -qi initialized"
         ])
 
-        executeCommand([
-                kubectlExecutable, '-n', namespace, 'exec', 'deployment/rocketmq-broker', '--',
-                'sh', '-lc',
-                '/home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n rocketmq-nameserver:9876 -c DefaultCluster -t bet-settlements'
+        retryCommand(12, 5000L, [
+                kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'exec', defaultKafkaExecTarget, '--',
+                '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', defaultKafkaBootstrapServer,
+                '--create', '--if-not-exists', '--topic', 'event-outcomes',
+                '--partitions', defaultKafkaTopicPartitions,
+                '--replication-factor', defaultKafkaTopicReplicationFactor
         ])
+
+        retryCommand(12, 5000L, [
+                kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'exec', defaultRocketMqExecTarget, '--',
+                'sh', '-lc',
+                "/home/rocketmq/rocketmq-5.3.2/bin/mqadmin updateTopic -n '${defaultRocketMqNameServer}' -c DefaultCluster -t bet-settlements"
+        ])
+
+        executeCommand([kubectlExecutable, '--context', kubectlContext, 'apply', '-n', namespace, '-f', applicationManifest])
+        executeCommand([kubectlExecutable, '--context', kubectlContext, 'apply', '-n', namespace, '-f', nginxManifest])
+        executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'restart', 'deployment/betting-engine'])
+
+        applicationRolloutTargets.each { rolloutTarget ->
+            executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'status', rolloutTarget, '--timeout=420s'])
+        }
+
+        if (localHaEnabled) {
+            executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'scale', 'deployment/betting-engine', '--replicas=2'])
+            executeCommand([kubectlExecutable, '--context', kubectlContext, '-n', namespace, 'rollout', 'status', 'deployment/betting-engine', '--timeout=420s'])
+        }
     }
 }
 
@@ -284,7 +432,13 @@ tasks.register('localNamespaceDown') {
     group = 'infrastructure'
     description = 'Deletes the local Kubernetes namespace and deployed resources.'
     doLast {
-        executeCommand([kubectlExecutableProvider.get(), 'delete', 'namespace', localNamespaceProvider.get(), '--ignore-not-found=true', '--wait=true'])
+        executeCommand([
+                kubectlExecutableProvider.get(),
+                '--context', kubectlContextProvider.get(),
+                'delete', 'namespace', localNamespaceProvider.get(),
+                '--ignore-not-found=true',
+                '--wait=true'
+        ])
     }
 }
 

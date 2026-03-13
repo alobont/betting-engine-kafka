@@ -3,5 +3,8 @@
 .gradle
 .idea
 .tools
+.tmp
 build
+!build/libs/
+!build/libs/*.jar
 docs

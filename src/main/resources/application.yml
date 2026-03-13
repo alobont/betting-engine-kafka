@@ -4,13 +4,10 @@ server:
 spring:
   application:
     name: betting-engine-kafka
-  data:
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
+      acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
     consumer:
@@ -43,8 +40,12 @@ app:
     topics:
       event-outcomes: event-outcomes
       bet-settlements: bet-settlements
-  redis:
-    bet-key-prefix: bets
-    event-index-prefix: bets-by-event
-    settlement-key-prefix: settlement-claims
-    settlement-claim-ttl: 30m
+  ignite:
+    addresses: ${IGNITE_ADDRESSES:localhost:10800}
+    zone-name: ${IGNITE_ZONE_NAME:BETTING_ENGINE_ZONE}
+    storage-profile: ${IGNITE_STORAGE_PROFILE:default_aimem}
+    zone-partitions: ${IGNITE_ZONE_PARTITIONS:8}
+    zone-replicas: ${IGNITE_ZONE_REPLICAS:1}
+    bet-table-name: ${IGNITE_BET_TABLE_NAME:BETS}
+    settlement-claim-table-name: ${IGNITE_SETTLEMENT_CLAIM_TABLE_NAME:SETTLEMENT_CLAIMS}
+    settlement-claim-ttl: ${IGNITE_SETTLEMENT_CLAIM_TTL:30m}

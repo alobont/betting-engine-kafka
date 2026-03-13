@@ -7,14 +7,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 
-class LocalK8sRedisIdempotencyIT extends LocalKubernetesTestSupport {
+class LocalK8sIgniteIdempotencyIT extends LocalKubernetesTestSupport {
 
     @Test
     void shouldAvoidDuplicateSettlementPublishesForCompetingOutcomeProcessing() throws Exception {
         assumeLocalKubernetesEnabled();
 
-        String firstCorrelationId = uniqueCorrelationId("local-redis-claim-1");
-        String secondCorrelationId = uniqueCorrelationId("local-redis-claim-2");
+        clearSettlementClaims(6006L);
+        String firstCorrelationId = uniqueCorrelationId("local-ignite-claim-1");
+        String secondCorrelationId = uniqueCorrelationId("local-ignite-claim-2");
 
         try (var executor = Executors.newFixedThreadPool(2)) {
             Future<java.net.http.HttpResponse<String>> firstResponse = executor.submit(
@@ -30,8 +31,8 @@ class LocalK8sRedisIdempotencyIT extends LocalKubernetesTestSupport {
         waitForAsyncProcessing();
 
         long totalSettlementPublishes = settlementLogCount(firstCorrelationId) + settlementLogCount(secondCorrelationId);
-        long totalClaimLogs = logLineCount(firstCorrelationId, "Redis settlement claim")
-                + logLineCount(secondCorrelationId, "Redis settlement claim");
+        long totalClaimLogs = logLineCount(firstCorrelationId, "Ignite settlement claim")
+                + logLineCount(secondCorrelationId, "Ignite settlement claim");
         long totalRejectedClaims = logLineCount(firstCorrelationId, "claimed=false")
                 + logLineCount(secondCorrelationId, "claimed=false");
         long totalDuplicateSkips = logLineCount(firstCorrelationId, "Skipping duplicate settlement")
@@ -41,7 +42,7 @@ class LocalK8sRedisIdempotencyIT extends LocalKubernetesTestSupport {
         assertThat(totalClaimLogs).isEqualTo(4);
         assertThat(totalRejectedClaims).isEqualTo(2);
         assertThat(totalDuplicateSkips).isEqualTo(2);
-        assertRedisClaimCount(6006L, 2);
+        assertIgniteClaimCount(6006L, 2);
     }
 
     private void assertAccepted(Future<java.net.http.HttpResponse<String>> response)

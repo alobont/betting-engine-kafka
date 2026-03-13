@@ -42,7 +42,7 @@ public class EventOutcomeProcessingService {
             String settlementKey = settlementKey(bet);
             boolean claimed = settlementClaimRepository.claim(settlementKey);
             log.info(
-                    "Redis settlement claim eventId={} betId={} correlationId={} settlementKey={} claimed={}",
+                    "Ignite settlement claim eventId={} betId={} correlationId={} settlementKey={} claimed={}",
                     bet.getEventId(),
                     bet.getBetId(),
                     correlationId,
@@ -80,7 +80,7 @@ public class EventOutcomeProcessingService {
         try {
             settlementClaimRepository.release(settlementKey);
             log.warn(
-                    "Released Redis settlement claim after publish failure eventId={} betId={} correlationId={} settlementKey={}",
+                    "Released Ignite settlement claim after publish failure eventId={} betId={} correlationId={} settlementKey={}",
                     bet.getEventId(),
                     bet.getBetId(),
                     correlationId,
@@ -88,7 +88,7 @@ public class EventOutcomeProcessingService {
             );
         } catch (RuntimeException releaseException) {
             log.error(
-                    "Failed to release Redis settlement claim eventId={} betId={} correlationId={} settlementKey={}",
+                    "Failed to release Ignite settlement claim eventId={} betId={} correlationId={} settlementKey={}",
                     bet.getEventId(),
                     bet.getBetId(),
                     correlationId,

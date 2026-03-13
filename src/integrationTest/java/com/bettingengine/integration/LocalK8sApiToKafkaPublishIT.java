@@ -10,6 +10,7 @@ class LocalK8sApiToKafkaPublishIT extends LocalKubernetesTestSupport {
     void shouldPublishEventOutcomeFromApiToKafkaInLocalKindCluster() throws Exception {
         assumeLocalKubernetesEnabled();
 
+        clearSettlementClaims(1001L);
         String correlationId = uniqueCorrelationId("local-api-kafka");
         var response = publishOutcome(1001L, "Championship Final", 10L, correlationId);
 

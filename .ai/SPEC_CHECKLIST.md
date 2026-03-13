@@ -2,9 +2,12 @@
 
 This checklist is complete only when the requirements in `REQUIREMENTS.md` and the architecture constraints in `AGENTS.md` are fully implemented.
 
+Status note:
+- checklist is complete and verified against both non-HA and HA local Kubernetes modes
+
 ## 1. Project bootstrap
 - [x] Create a Java 21 + Spring Boot project
-- [x] Add required dependencies: Web, Validation, Kafka, RocketMQ Spring Boot starter, Data Redis, Actuator, Protobuf runtime
+- [x] Add required dependencies: Web, Validation, Kafka, RocketMQ Spring Boot starter, Ignite client, Actuator, Protobuf runtime
 - [x] Add Protobuf code generation for the chosen build tool
 - [x] Set the root package to `com.bettingengine`
 - [x] Create the required package structure:
@@ -21,24 +24,27 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
 - [x] Create `BettingEngineApplication` in the root package
 
 ## 2. Configuration
-- [x] Add application configuration for HTTP, Kafka, RocketMQ, Redis, and Actuator
+- [x] Add application configuration for HTTP, Kafka, RocketMQ, Ignite, and Actuator
 - [x] Centralize topic names for `event-outcomes` and `bet-settlements`
-- [x] Configure local-development-friendly defaults
+- [x] Configure local-development-friendly defaults for Ignite-backed local deployment
 - [x] Configure JSON serialization for HTTP payloads
 - [x] Configure Protobuf serialization for Kafka and RocketMQ payloads
-- [x] Configure Redis settings for bet storage and settlement-key TTL
+- [x] Configure Ignite settings for in-memory mode, transactions, partitioning, and settlement-key expiry
+- [x] Disable Ignite native persistence explicitly
 
 ## 3. In-memory bet storage
-- [x] Implement the Redis-backed bet record with:
+- [x] Implement the Ignite-backed bet record with:
   - [x] `betId`
   - [x] `userId`
   - [x] `eventId`
   - [x] `eventMarketId`
   - [x] `eventWinnerId`
   - [x] `betAmount`
-- [x] Create the Redis-backed repository for bets
-- [x] Seed a deterministic in-memory Redis dataset for bets
+- [x] Create the Ignite-backed repository for bets
+- [x] Seed a deterministic in-memory Ignite dataset for bets
 - [x] Verify lookup by `eventId`
+- [x] Configure bets and settlement claims for ACID-safe transactional access
+- [x] Define deliberate partitioning, sharding, and affinity for event-driven access patterns
 
 ## 4. API contract
 - [x] Implement `POST /event-outcomes`
@@ -62,7 +68,7 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
 - [x] Implement Kafka consumer for topic `event-outcomes`
 - [x] Deserialize the Protobuf message into a typed event outcome model
 - [x] Log consume start and consume result
-- [x] Find bets by `eventId` from Redis
+- [x] Find bets by `eventId` from Ignite
 - [x] Verify that matching identifies the bets that require downstream settlement messages
 - [x] Handle invalid consumed messages clearly and safely
 
@@ -75,12 +81,13 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
 - [x] Do not silently drop publish failures
 
 ## 8. Idempotency and failure behavior
-- [x] Implement duplicate-protection logic for repeated Kafka deliveries across pods and processes
+- [x] Implement duplicate-protection logic for repeated Kafka deliveries across pods, processes, and Ignite nodes
 - [x] Derive a stable settlement key from `betId` and `eventId`
-- [x] Claim settlement keys atomically in Redis with bounded TTL
-- [x] Ensure duplicate delivery does not produce inconsistent duplicate side effects across pods and processes
+- [x] Claim settlement keys atomically in Ignite with transactional safety and bounded expiry
+- [x] Ensure duplicate delivery does not produce inconsistent duplicate side effects across pods, processes, and shards
 - [x] Ensure any local guards or locks are only process-local optimizations and are safe under concurrent execution
 - [x] Keep retry behavior controlled and understandable
+- [x] If distributed locks are used, ensure they are Ignite-backed and safe across nodes and shards
 
 ## 9. Error handling and observability
 - [x] Implement global exception handling
@@ -89,22 +96,23 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
   - [x] Kafka publish
   - [x] Kafka consume
   - [x] bet match count
-  - [x] Redis idempotency claim
+- [x] Ignite idempotency claim
   - [x] RocketMQ publish
 - [x] Expose health endpoints
 - [x] Add basic metrics if cheap in the chosen implementation
 
 ## 10. Testing
 - [x] Add unit tests for request validation
-- [x] Add unit tests for matching by `eventId` from Redis
-- [x] Add unit tests for duplicate handling behavior
+- [x] Add unit tests for matching by `eventId` from Ignite
+- [x] Add unit tests for duplicate handling behavior with Ignite-backed idempotency
 - [x] Add unit tests for safe concurrent behavior of any remaining local guards or locks
 - [x] Add integration tests for API to Kafka publish
-- [x] Add integration tests for Kafka consume to Redis bet lookup
-- [x] Add integration tests for bet lookup to Redis idempotency claim
-- [x] Add integration tests for successful Redis claim to RocketMQ publish
-- [x] Add integration tests that simulate competing process or pod settlement attempts against shared Redis
-- [x] Ensure integration tests start or target a local `kind` Kubernetes cluster and execute against deployed Kubernetes resources
+- [x] Add integration tests for Kafka consume to Ignite bet lookup
+- [x] Add integration tests for bet lookup to Ignite idempotency claim
+- [x] Add integration tests for successful Ignite claim to RocketMQ publish
+- [x] Add integration tests that simulate competing process or pod settlement attempts against shared Ignite
+- [x] Add integration tests for transactional safety, shard safety, and any Ignite-backed lock behavior that participates in correctness
+- [x] Ensure integration tests start or target a local `kind` Kubernetes cluster and execute against deployed Kubernetes resources using Ignite
 - [x] Verify message schemas remain explicit and stable
 
 ## 11. Containerization and Kubernetes
@@ -112,14 +120,14 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
 - [x] Provide Kubernetes manifests for the betting engine service
 - [x] Ensure Kafka is reachable inside the cluster
 - [x] Ensure RocketMQ is reachable inside the cluster
-- [x] Add a dedicated Redis deployment and service for bet storage and settlement idempotency
-- [x] Ensure Redis is reachable inside the cluster
+- [x] Add a dedicated Apache Ignite deployment and service for bet storage and settlement idempotency
+- [x] Ensure Ignite is reachable inside the cluster
 - [x] Add an `nginx` deployment in front of externally exposed HTTP traffic
 - [x] Do not expose the application directly through `NodePort`
 - [x] Standardize local Kubernetes development on `kind` so Windows with Docker Desktop and Linux both support one-line cluster creation and deletion
 
 ## 12. Final verification
-- [x] Confirm every requirement in `REQUIREMENTS.md` is implemented
+- [x] Confirm every requirement in `REQUIREMENTS.md` is implemented under the Ignite architecture
 - [x] Confirm implementation still follows `AGENTS.md`
 - [x] Confirm the service is intentionally small and easy to reason about
 - [x] Record final verification notes in `.ai/PROGRESS_NOTES.md`
@@ -135,4 +143,16 @@ This checklist is complete only when the requirements in `REQUIREMENTS.md` and t
 - [x] Add a root `README.md` that explains how to run the local Kubernetes environment, run tests, and remove the local cluster
 - [x] Document one-line local cluster startup for Windows PowerShell with Docker Desktop and Linux
 - [x] Document one-line local namespace or deployment teardown and full cluster deletion for Windows PowerShell with Docker Desktop and Linux
-- [x] Run end-to-end tests against the locally running Redis-backed Kubernetes deployment
+- [x] Run end-to-end tests against the locally running Ignite-backed Kubernetes deployment
+- [x] Update the root `README.md` so the local workflow reflects Ignite rather than Redis
+
+## 15. Optional HA local mode
+- [x] Keep default local mode non-HA
+- [x] Add an opt-in HA mode enabled with `-Plocal.ha=true`
+- [x] Use a dedicated HA cluster name, namespace, context, and host port so HA and non-HA local modes do not conflict
+- [x] Provide a real Kafka HA topology for local HA mode
+- [x] Provide a real Ignite HA topology for local HA mode in pure in-memory mode
+- [x] Provide a real RocketMQ HA topology for local HA mode
+- [x] Scale the betting-engine and `nginx` deployments to `2` replicas in HA mode
+- [x] Add HA-focused integration coverage for Ignite node recovery, transactional correctness, and shard-safe duplicate protection
+- [x] Verify the HA integration and end-to-end flow against the deployed local HA cluster using Ignite

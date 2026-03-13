@@ -193,45 +193,121 @@ spec:
       targetPort: 10909
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: redis
+  name: ignite
 spec:
+  serviceName: ignite
   replicas: 1
+  podManagementPolicy: OrderedReady
   selector:
     matchLabels:
-      app: redis
+      app: ignite
   template:
     metadata:
       labels:
-        app: redis
+        app: ignite
     spec:
       containers:
-        - name: redis
-          image: redis:7.4-alpine
+        - name: ignite
+          image: apacheignite/ignite:3.1.0
           imagePullPolicy: IfNotPresent
-          args:
-            - redis-server
-            - --save
-            - ""
-            - --appendonly
-            - "no"
           ports:
-            - containerPort: 6379
+            - containerPort: 3344
+            - containerPort: 10300
+            - containerPort: 10800
+          command:
+            - sh
+            - -lc
+          args:
+            - |
+              mkdir -p /var/lib/ignite/config /var/lib/ignite/work;
+              cp /config/ignite-config.conf /var/lib/ignite/config/ignite-config.conf;
+              exec docker-entrypoint.sh \
+                --config-path /var/lib/ignite/config/ignite-config.conf \
+                --work-dir /var/lib/ignite/work \
+                --node-name ${HOSTNAME}
+          readinessProbe:
+            tcpSocket:
+              port: 10300
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 10300
+            initialDelaySeconds: 40
+            periodSeconds: 15
           volumeMounts:
-            - name: redis-data
-              mountPath: /data
+            - name: ignite-config
+              mountPath: /config
+            - name: ignite-data
+              mountPath: /var/lib/ignite
       volumes:
-        - name: redis-data
+        - name: ignite-config
+          configMap:
+            name: ignite-config
+        - name: ignite-data
           emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ignite-config
+data:
+  ignite-config.conf: |
+    ignite {
+      network {
+        port=3344
+        nodeFinder {
+          type=STATIC
+          netClusterNodes=[
+            "ignite-0.ignite:3344"
+          ]
+        }
+      }
+      clientConnector {
+        port=10800
+      }
+      rest {
+        port=10300
+      }
+      storage.profiles {
+        default_aimem {
+          engine=aimem
+        }
+      }
+    }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis
+  name: ignite
 spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
   selector:
-    app: redis
+    app: ignite
   ports:
-    - port: 6379
-      targetPort: 6379
+    - name: cluster
+      port: 3344
+      targetPort: 3344
+    - name: rest
+      port: 10300
+      targetPort: 10300
+    - name: client
+      port: 10800
+      targetPort: 10800
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ignite-client
+spec:
+  type: NodePort
+  selector:
+    app: ignite
+  ports:
+    - name: client
+      port: 10800
+      targetPort: 10800
+      nodePort: 30082
